@@ -598,6 +598,9 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
 
+        # Additional configuration, such as: disable_kv_cache, weight_offloading, skip_deep_gemm_warmup, etc.
+        self._additional_config = getattr(self.vllm_config, "additional_config", None)
+
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
             self.mm_budget.reset_cache()
@@ -2977,6 +2980,7 @@ class GPUModelRunner(
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
 
+        logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:execute_model: num_scheduled_tokens: {num_scheduled_tokens}.")
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
@@ -3488,6 +3492,17 @@ class GPUModelRunner(
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
                 )
+            if isinstance(self._additional_config, dict) and self._additional_config.get("weight_offloading", False):
+                logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: weight_offloading is enabled...")
+                assert self.vllm_config.parallel_config.tensor_parallel_size == 1 and self.vllm_config.parallel_config.pipeline_parallel_size == 1, "Weight offloading not supported for tensor parallel or pipeline parallel server."
+                from vllm.model_executor.weight_streaming import init_decoder_weight_streaming
+                init_decoder_weight_streaming(model=self.model,
+                            device=self.device,
+                            vllm_config=self.vllm_config,
+                            pin_memory=self.pin_memory,
+                            num_slots=5,
+                            window_k=3)
+                # logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py: after weight offloading manager initialization: {self.model}")
             if hasattr(self, "drafter"):
                 logger.info_once("Loading drafter model...")
                 self.drafter.load_model(self.model)
