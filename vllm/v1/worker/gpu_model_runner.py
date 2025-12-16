@@ -606,6 +606,9 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.layerwise_nvtx_hooks_registered = False
 
+        # Additional configuration, such as: disable_kv_cache, weight_offloading, skip_deep_gemm_warmup, etc.
+        self._additional_config = getattr(self.vllm_config, "additional_config", None)
+
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
             self.mm_budget.reset_cache()
@@ -3067,6 +3070,7 @@ class GPUModelRunner(
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
 
+        logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:execute_model: num_scheduled_tokens: {num_scheduled_tokens}.")
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
@@ -3583,6 +3587,19 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+                if isinstance(self._additional_config, dict) and self._additional_config.get("weight_offloading", False):
+                    logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: weight_offloading is enabled...")
+                    # logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: self.vllm_config: {self.vllm_config}.") 
+                    # logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: self.vllm_config.parallel_config: {self.vllm_config.parallel_config}.")
+                    assert self.vllm_config.parallel_config.tensor_parallel_size == 1 and self.vllm_config.parallel_config.pipeline_parallel_size == 1, "Weight offloading not supported for tensor parallel or pipeline parallel server."
+                    from vllm.model_executor.weight_streaming import init_decoder_weight_streaming
+                    init_decoder_weight_streaming(model=self.model,
+                                device=self.device,
+                                vllm_config=self.vllm_config,
+                                pin_memory=self.pin_memory,
+                                num_slots=5,
+                                window_k=3)
+                    # logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py: after weight offloading manager initialization: {self.model}")
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     self.drafter.load_model(self.model)
@@ -5280,30 +5297,37 @@ class GPUModelRunner(
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-
-        # Try creating KV caches optimized for kv-connector transfers
-        cache_dtype = self.cache_config.cache_dtype
-        if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
-            kv_caches, cross_layers_kv_cache, attn_backend = (
-                self.allocate_uniform_kv_caches(
-                    kv_cache_config,
-                    self.attn_groups,
-                    cache_dtype,
-                    self.device,
-                    kernel_block_sizes,
-                )
-            )
-            self.cross_layers_kv_cache = cross_layers_kv_cache
-            self.cross_layers_attn_backend = attn_backend
+        if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+            kv_caches: dict[str, torch.Tensor] = {}
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                tensor = torch.zeros((2, 1), dtype=torch.bfloat16, device=self.device)
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_caches[layer_name] = tensor
+            logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:initialize_kv_cache_tensors: len(kv_caches) {len(kv_caches)}")
         else:
-            # Fallback to the general case
-            # Initialize the memory buffer for KV cache
-            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            # Try creating KV caches optimized for kv-connector transfers
+            cache_dtype = self.cache_config.cache_dtype
+            if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
+                kv_caches, cross_layers_kv_cache, attn_backend = (
+                    self.allocate_uniform_kv_caches(
+                        kv_cache_config,
+                        self.attn_groups,
+                        cache_dtype,
+                        self.device,
+                        kernel_block_sizes,
+                    )
+                )
+                self.cross_layers_kv_cache = cross_layers_kv_cache
+                self.cross_layers_attn_backend = attn_backend
+            else:
+                # Fallback to the general case
+                # Initialize the memory buffer for KV cache
+                kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
 
-            # Change the memory buffer to the desired shape
-            kv_caches = self._reshape_kv_cache_tensors(
-                kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
-            )
+                # Change the memory buffer to the desired shape
+                kv_caches = self._reshape_kv_cache_tensors(
+                    kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
+                )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():

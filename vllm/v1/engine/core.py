@@ -104,7 +104,8 @@ class EngineCore:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
         self.available_gpu_memory_for_kv_cache = -1
-
+        # Disable KV cache by setting additional_config.disable_kv_cache to True
+        self._additional_config = getattr(self.vllm_config, "additional_config", None)
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
             vllm_config
@@ -125,6 +126,10 @@ class EngineCore:
             if vllm_config.scheduler_config.enable_chunked_prefill:
                 logger.warning("Disabling chunked prefill for model without KVCache")
                 vllm_config.scheduler_config.enable_chunked_prefill = False
+        
+        if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+            logger.info(f"~~~~ vllm/v1/engine/core.py:__init__: disable_kv_cache is enabled, turning off the chunked-prefill.")
 
         scheduler_block_size = (
             vllm_config.cache_config.block_size
@@ -244,6 +249,12 @@ class EngineCore:
             available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
+
+        # Disable KV cache by setting available_gpu_memory to 1 TB hardcoded
+        if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+            available_gpu_memory = [1024 * 1024 * 1024 * 1024] * len(kv_cache_specs)
+            self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+            logger.info(f"~~~~ vllm/v1/engine/core.py:_initialize_kv_caches: disable_kv_cache is enabled, so setting available_gpu_memory to 1 TB hardcoded...")
 
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory

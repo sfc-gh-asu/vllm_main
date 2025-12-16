@@ -31,7 +31,14 @@ def kernel_warmup(worker: "Worker"):
         and is_deep_gemm_supported()
         and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
+    try:
+        if isinstance(worker.model_runner._additional_config, dict) and (worker.model_runner._additional_config.get("weight_offloading", False) or worker.model_runner._additional_config.get("skip_deep_gemm_warmup", False)):
+            logger.info("~~~~ vllm/model_executor/warmup/kernel_warmup.py:kernel_warmup: Skipping DeepGEMM warmup, because weight offloading or skip_deep_gemm_warmup is enabled.")
+            do_deep_gemm_warmup = False
+    except Exception:
+        pass
     if do_deep_gemm_warmup:
+        logger.info(f"~~~~ vllm/model_executor/warmup/kernel_warmup.py:kernel_warmup: doing deep gemm warmup...")
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)

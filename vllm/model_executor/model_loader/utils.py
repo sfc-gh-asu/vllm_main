@@ -79,8 +79,9 @@ def initialize_model(
 
 
 def process_weights_after_loading(
-    model: nn.Module, model_config: ModelConfig, target_device: torch.device
+    model: nn.Module, model_config: ModelConfig, target_device: torch.device, not_pin_postprocessed_weights_to_cpu: bool = False
 ) -> None:
+    logger.info(f"~~~~ vllm/model_executor/model_loader/utils.py: process_weights_after_loading: weights postprocessing and attention postprocessing on GPU({target_device}) is started.")
     if getattr(model, "process_weights_after_loading_already_called", False):
         # In case `process_weights_after_loading` is called multiple times
         # we'll skip it at later times
@@ -104,7 +105,7 @@ def process_weights_after_loading(
             # to be on the global target device. This scope is for the
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
-            with device_loading_context(module, target_device):
+            with device_loading_context(module, target_device, not_pin_postprocessed_weights_to_cpu):
                 quant_method.process_weights_after_loading(module)
 
     # Initialize post-load attention weights for both Attention and MLA.
@@ -119,7 +120,7 @@ def process_weights_after_loading(
 
 
 @contextmanager
-def device_loading_context(module: torch.nn.Module, target_device: torch.device):
+def device_loading_context(module: torch.nn.Module, target_device: torch.device, not_pin_postprocessed_weights_to_cpu: bool = False):
     if target_device.type == "cpu":
         # If target is CPU, no need to move anything
         yield module
@@ -140,6 +141,8 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
     finally:
         # Restore parameters to their original devices, ignoring new parameters
         pin_memory = is_pin_memory_available()
+        if not_pin_postprocessed_weights_to_cpu:
+            pin_memory = False
         for name, p in module.named_parameters():
             if name in original_device_states:
                 original_device: torch.device = original_device_states[name]

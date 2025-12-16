@@ -18,9 +18,13 @@ from typing import Any, Literal, cast
 
 import vllm.envs as envs
 
+# _FORMAT = (
+#     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
+#     "[%(fileinfo)s:%(lineno)d] %(message)s"
+# )
 _FORMAT = (
     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
-    "[%(fileinfo)s:%(lineno)d] %(message)s"
+    "[%(pathname)s:%(lineno)d] %(message)s"
 )
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 

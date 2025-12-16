@@ -585,6 +585,84 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
 
     return module
 
+def make_layers_with_first_layer_weights(
+    start_layer: int,
+    end_layer: int,
+    num_hidden_layers: int,
+    layer_fn: LayerFn,
+    prefix: str,
+) -> tuple[int, int, torch.nn.ModuleList]:
+    """Make a list of layers with the given layer function, taking
+    pipeline parallelism into account."""
+
+    def _resolve_parent_and_attr(module: torch.nn.Module, dotted_name: str) -> tuple[torch.nn.Module, str]:
+        parent = module
+        parts = dotted_name.split(".")
+        for p in parts[:-1]:
+            parent = getattr(parent, p)
+        return parent, parts[-1]
+
+    logger.info(f"~~~~ vllm/model_executor/models/utils.py: make_layers_with_first_layer_weights: simulation mode, only keep first layer weights and reuse it.")
+    modules = torch.nn.ModuleList([PPMissingLayer() for _ in range(num_hidden_layers)])
+    modules[0] = maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{0}"))
+    base_param_map = dict(modules[0].named_parameters(recurse=True))
+    base_buf_map = dict(modules[0].named_buffers(recurse=True))
+    for idx in range(1, end_layer):
+        layer = maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
+        # Tie parameter storage
+        for name, p0 in base_param_map.items():
+            parent, attr = _resolve_parent_and_attr(layer, name)
+            # Share storage (keep distinct Parameter wrappers)
+            parent._parameters[attr].data = p0.data
+            parent._parameters[attr].requires_grad = False
+        # Tie buffers
+        for name, b0 in base_buf_map.items():
+            parent, attr = _resolve_parent_and_attr(layer, name)
+            parent._buffers[attr] = b0  # point to same tensor
+        modules[idx] = layer
+    # logger.info(f"modules: {modules}")
+    return start_layer, end_layer, modules
+
+
+def make_layers_with_weight_offloading(
+    start_layer: int,
+    end_layer: int,
+    num_hidden_layers: int,
+    layer_fn: LayerFn,
+    prefix: str,
+) -> tuple[int, int, torch.nn.ModuleList]:
+    """Stage-1 for weight offloading:
+    - Move Parameters to CPU (non-pinned). Buffers are left untouched.
+    - Because the tensors and weights might be changed after the weight loaded from disk by postprocessing,
+        so we just move the parameters to CPU first, and then after the postprocessing, 
+        we will have a function (stage-2) to pack the finalized parameters by dtype (or a single uint8 flat tensor) and rebind the parameters to the views.
+    """
+    logger.info(f"~~~~ vllm/model_executor/models/utils.py: make_layers_with_weight_offloading from layer index: {start_layer} to {end_layer} for model: {layer_fn.__class__.__name__} to CPU...")
+    def _move_params_to_cpu(module: torch.nn.Module) -> None:
+        for p in module.parameters(recurse=True):
+            if p.device.type != "cpu":
+                p.data = p.data.to("cpu", non_blocking=False)
+    from tqdm import tqdm
+    real_layers: list[torch.nn.Module] = []
+    iterable = range(start_layer, end_layer)
+    if tqdm is not None:
+        iterable = tqdm(
+            iterable,
+            total=end_layer - start_layer,
+            desc=f"Building decoder layers [{prefix}]",
+            dynamic_ncols=True,
+            leave=False,
+        )
+    for idx in iterable:
+        lyr = layer_fn(prefix=f"{prefix}.{idx}")
+        _move_params_to_cpu(lyr)
+        real_layers.append(lyr)
+    modules = torch.nn.ModuleList(
+        [PPMissingLayer() for _ in range(start_layer)]
+        + real_layers
+        + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
+    )
+    return start_layer, end_layer, modules
 
 def make_layers(
     num_hidden_layers: int,
@@ -600,6 +678,15 @@ def make_layers(
     start_layer, end_layer = get_pp_indices(
         num_hidden_layers, get_pp_group().rank_in_group, get_pp_group().world_size
     )
+
+    from vllm.config import get_current_vllm_config
+    cfg = get_current_vllm_config()
+    ac = getattr(cfg, "additional_config", None)
+    if isinstance(ac, dict) and ac.get("reuse_first_layer", False):
+        return make_layers_with_first_layer_weights(start_layer, end_layer, num_hidden_layers, layer_fn, prefix)
+    if isinstance(ac, dict) and ac.get("weight_offloading", False) and not ac.get("moe_allgather_only", False):
+        return make_layers_with_weight_offloading(start_layer, end_layer, num_hidden_layers, layer_fn, prefix)
+
     modules = torch.nn.ModuleList(
         [PPMissingLayer() for _ in range(start_layer)]
         + [

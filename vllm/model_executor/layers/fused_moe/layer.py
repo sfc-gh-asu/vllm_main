@@ -1481,6 +1481,7 @@ class FusedMoE(CustomOp):
         if self.quant_method.moe_quant_config is None:
             # Note: the moe_quant_config can't be constructed until after
             # weight loading post processing.
+            logger.info(f"~~~~ vllm/model_executor/layers/fused_moe/layer.py:ensure_moe_quant_config_init: quant_method.moe_quant_config is None, calling get_fused_moe_quant_config()")
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )

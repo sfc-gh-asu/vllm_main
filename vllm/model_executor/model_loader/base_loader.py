@@ -53,5 +53,16 @@ class BaseModelLoader(ABC):
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
-            process_weights_after_loading(model, model_config, target_device)
+            # By default, the postprocessed weights will be pinned to CPU pinned memory.
+            # But in case of weight offloading, we will check if weight_offloading is enabled and moe_allgather_only is not enabled;
+            # weight_offloading is enabled by setting "weight_offloading" to True in additional_config.
+            # For single GPU, moe_allgather_only is not enabled by default; 
+            # For multi-GPU, moe_allgather_only is enabled by setting "moe_allgather_only" to True in additional_config.
+            # If both conditions are met (H2D is enabled), we will not pin the postprocessed weights to CPU pinned memory, 
+            # because we will pin the postprocessed weights in the weight offloading manager later in GPU Model Runner, 
+            # so that the unpinned CPU memory for postprocessed weights will be freed after weight offloader initialization.
+            additional_config = getattr(vllm_config, "additional_config", None)
+            not_pin_postprocessed_weights_to_cpu = bool(isinstance(additional_config, dict) and additional_config.get("weight_offloading", False) and not additional_config.get("moe_allgather_only", False))
+            logger.info(f"~~~~ vllm/model_executor/model_loader/base_loader.py: load_model: not_pin_postprocessed_weights_to_cpu is: {not_pin_postprocessed_weights_to_cpu}")
+            process_weights_after_loading(model, model_config, target_device, not_pin_postprocessed_weights_to_cpu)
         return model.eval()
