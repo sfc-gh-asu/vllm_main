@@ -81,6 +81,7 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device, not_pin_postprocessed_weights_to_cpu: bool = False
 ) -> None:
+    logger.info(f"~~~~ vllm/model_executor/model_loader/utils.py: postprocessing weights after loading...")
     if getattr(model, "process_weights_after_loading_already_called", False):
         # In case `process_weights_after_loading` is called multiple times
         # we'll skip it at later times

@@ -5173,30 +5173,38 @@ class GPUModelRunner(
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-
-        # Try creating KV caches optimized for kv-connector transfers
-        cache_dtype = self.cache_config.cache_dtype
-        if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
-            kv_caches, cross_layers_kv_cache, attn_backend = (
-                self.allocate_uniform_kv_caches(
-                    kv_cache_config,
-                    self.attn_groups,
-                    cache_dtype,
-                    self.device,
-                    kernel_block_sizes,
-                )
-            )
-            self.cross_layers_kv_cache = cross_layers_kv_cache
-            self.cross_layers_attn_backend = attn_backend
+        if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+            kv_caches: dict[str, torch.Tensor] = {}
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                tensor = torch.zeros((2, 1), dtype=torch.bfloat16, device=self.device)
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_caches[layer_name] = tensor
+            logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:initialize_kv_cache_tensors with disable_kv_cache enabled for layer number: len(kv_caches) {len(kv_caches)}")
         else:
-            # Fallback to the general case
-            # Initialize the memory buffer for KV cache
-            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            # original kv cache tensor initialization code
+            # Try creating KV caches optimized for kv-connector transfers
+            cache_dtype = self.cache_config.cache_dtype
+            if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
+                kv_caches, cross_layers_kv_cache, attn_backend = (
+                    self.allocate_uniform_kv_caches(
+                        kv_cache_config,
+                        self.attn_groups,
+                        cache_dtype,
+                        self.device,
+                        kernel_block_sizes,
+                    )
+                )
+                self.cross_layers_kv_cache = cross_layers_kv_cache
+                self.cross_layers_attn_backend = attn_backend
+            else:
+                # Fallback to the general case
+                # Initialize the memory buffer for KV cache
+                kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
 
-            # Change the memory buffer to the desired shape
-            kv_caches = self._reshape_kv_cache_tensors(
-                kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
-            )
+                # Change the memory buffer to the desired shape
+                kv_caches = self._reshape_kv_cache_tensors(
+                    kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
+                )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():

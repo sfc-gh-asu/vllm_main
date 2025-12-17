@@ -395,7 +395,7 @@ class _MoEGatherer:
                 setattr(qm, "rocm_aiter_moe_enabled", False)
         # For old version of vllm, use ensure_moe_quant_config()
         # tmpl.ensure_moe_quant_config()
-        # For new version of vllm, use ensure_moe_quant_config_init()
+        # For v0.12.0 and newer version of vllm, use ensure_moe_quant_config_init()
         tmpl.ensure_moe_quant_config_init()
         assert tmpl.local_num_experts == tmpl.global_num_experts
         return tmpl
@@ -485,7 +485,7 @@ class _MoEGatherer:
         def compute_fn(hidden_states: torch.Tensor, router_logits: torch.Tensor):
             # For old version of vllm, use ensure_moe_quant_config()
             # tmpl.ensure_moe_quant_config()
-            # For new version of vllm, use ensure_moe_quant_config_init()
+            # For v0.12.0 and newer version of vllm, use ensure_moe_quant_config_init()
             tmpl.ensure_moe_quant_config_init()
             return tmpl.quant_method.apply(
                 layer=tmpl,
@@ -720,9 +720,11 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 
 # NOTE: The following notes are for the complete development of weight streaming, with all the features:
 # logger format change.
+# Print the forward batch size with tokens.
 # skipping the DeepGEMM warmup when weight offloading is enabled.
 # Simulation mode with reuse_first_layer.
 # Weight offloading mode.
+# Disable KV cache.
 
 # Related files:
 # adding new file: 
@@ -773,122 +775,6 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 #         do_deep_gemm_warmup = False
 # except Exception:
 #     pass
-
-
-
-
-# NOTE: Disable KV cache.
-# Usage: --additional-config '{"disable_kv_cache": true}'
-# 1. Initialize the additional_config in the vllm/v1/engine/core.py:__init__ function.
-# In the vllm/v1/engine/core.py:__init__ function, 
-#       before num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(vllm_config), 
-#       add the following code for disabling the KV cache:
-# self._additional_config = getattr(self.vllm_config, "additional_config", None)
-
-# 2. Setting the available_gpu_memory to 1 TB hardcoded when disable_kv_cache is enabled, for scheduling.
-# In the vllm/v1/engine/core.py:_initialize_kv_caches function, 
-#       after assert len(kv_cache_specs) == len(available_gpu_memory)
-#       and before kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs, available_gpu_memory),
-#       add the following code for disabling the KV cache:
-# if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
-#     available_gpu_memory = [1024 * 1024 * 1024 * 1024] * len(kv_cache_specs)
-#     self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
-#     logger.info(f"~~~~ vllm/v1/engine/core.py:_initialize_kv_caches: disable_kv_cache is enabled, so setting available_gpu_memory to 1 TB hardcoded...")
-
-# 3. Skip the KV cache tensor initialization when disable_kv_cache is enabled.
-# After setting the available_gpu_memory to 1 TB hardcoded only is not enough, 
-# Cause then self.model_executor.initialize_from_config(kv_cache_configs) function will initiate the KV cache tensors,
-# So we need to skip the KV cache tensor initialization when disable_kv_cache is enabled.
-# In the vllm/v1/worker/gpu_model_runner.py:initialize_kv_cache_tensors function, 
-#       update the following code by adding a new condition branch for disabling the KV cache tensor initialization:
-# if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
-#     kv_caches: dict[str, torch.Tensor] = {}
-#     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-#         tensor = torch.zeros((2, 1), dtype=torch.bfloat16, device=self.device)
-#         for layer_name in kv_cache_tensor.shared_by:
-#             kv_caches[layer_name] = tensor
-#     logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:initialize_kv_cache_tensors: len(kv_caches) {len(kv_caches)}")
-# else:
-#     # original kv cache tensor initialization code
-
-# 4. Turn off the chunked-prefill when disable_kv_cache is enabled.
-# In the vllm/v1/engine/core.py:__init__ function, 
-#       after if len(kv_cache_config.kv_cache_groups) == 0, means no KV cache is needed, so turning off the chunked-prefill,
-#       So we follow the same logic to turn off the chunked-prefill manually, by adding the following code:
-# if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
-#     vllm_config.scheduler_config.enable_chunked_prefill = False
-#     logger.info(f"~~~~ vllm/v1/engine/core.py:__init__: disable_kv_cache is enabled, turning off the chunked-prefill.")
-
-# 5. Redirect the attention computation backend API to use reuse the encoding kernel,
-#       So that we can skip the KV cache write and read operations, 
-#       and directly use the Causal Attention kernel from encoding kernel.
-# In the vllm/v1/attention/backends/flash_attn.py:FlashAttentionImpl:__init__ function end,
-#       add the following code for initialization the _additional_config:
-# self._additional_config = getattr(get_current_vllm_config(), "additional_config", None)
-# In the vllm/v1/attention/backends/flash_attn.py:FlashAttentionImpl:forward function,
-#       after if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER),
-#       add a new disable KV cache condition branch,
-#       for redirecting the attention computation backend API to reuse the encoding kernel:
-# if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
-#     # Disable the KV cache,
-#     # Directly use the causal attention kernel from encoding kernel.
-#     return self._forward_prefill_only_attention(
-#         query[:num_actual_tokens],
-#         key[:num_actual_tokens],
-#         value[:num_actual_tokens],
-#         output[:num_actual_tokens],
-#         attn_metadata, 
-#         layer,
-#     )
-# In the vllm/v1/attention/backends/cpu_attn.py, add the new function implementation:
-# def _forward_prefill_only_attention(
-#     self,
-#     query: torch.Tensor,
-#     key: torch.Tensor,
-#     value: torch.Tensor,
-#     output: torch.Tensor,
-#     attn_metadata: FlashAttentionMetadata,
-#     layer: torch.nn.Module,
-# ) -> torch.Tensor:
-#     """Forward pass for prefill-only attention.
-#     Args:
-#         query: shape = [num_prefill_tokens, num_heads, head_size]
-#         key: shape = [num_prefill_tokens, num_kv_heads, head_size]
-#         value: shape = [num_prefill_tokens, num_kv_heads, head_size]
-#         output: shape = [num_prefill_tokens, num_heads, head_size]
-#         attn_metadata: Prefill-only attention metadata
-#         layer: The attention layer
-#     """
-#     if self.kv_cache_dtype.startswith("fp8"):
-#         dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
-#             self.kv_cache_dtype)
-#         key = key.view(dtype)
-#         value = value.view(dtype)
-#     cu_seqlens_q = attn_metadata.query_start_loc
-#     cu_seqlens_k = attn_metadata.query_start_loc
-#     max_seqlen_q = attn_metadata.max_query_len
-#     max_seqlen_k = attn_metadata.max_query_len
-#     descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
-#     flash_attn_varlen_func(
-#         q=query,
-#         k=key,
-#         v=value,
-#         out=output,
-#         cu_seqlens_q=cu_seqlens_q,
-#         cu_seqlens_k=cu_seqlens_k,
-#         max_seqlen_q=max_seqlen_q,
-#         max_seqlen_k=max_seqlen_k,
-#         softmax_scale=self.scale,
-#         causal=True,                         
-#         alibi_slopes=self.alibi_slopes,
-#         window_size=self.sliding_window,
-#         softcap=self.logits_soft_cap,
-#         fa_version=self.vllm_flash_attn_version,
-#         q_descale=layer._q_scale.expand(descale_shape),
-#         k_descale=layer._k_scale.expand(descale_shape),
-#         v_descale=layer._v_scale.expand(descale_shape),
-#     )
-#     return output
 
 
 
@@ -956,6 +842,8 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 # self._additional_config = getattr(self.vllm_config, "additional_config", None)
 
 
+
+
 # NOTE: Weight offloading mode, turn on in the GPU Model Runner.
 # In the end of the GPUModelRunner load_model function, just after load model and if self.lora_config: 
 # if isinstance(self._additional_config, dict) and self._additional_config.get("weight_offloading", False):
@@ -970,6 +858,7 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 #                 pin_memory=self.pin_memory,
 #                 num_slots=5,
 #                 window_k=3)
+
 
 
 
@@ -1022,6 +911,19 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 #     return start_layer, end_layer, modules
 
 
+
+
+# NOTE: Multi-GPU weight offloading mode, compute the MoE part in each GPU individually, so inception of MoE forward is needed for each GPU.
+# usage: --additional-config '{"weight_offloading": true}' for multi-GPU (H2D is enabled by default), or --additional-config '{"weight_offloading": true, "moe_allgather_only": true}' for multi-GPU only (H2D is disabled).
+# In vllm/model_executor/layers/fused_moe/layer.py, find the real forward function of MoE, which is forward_impl for qwen3 moe models.
+#     In the beginning of the forward_impl function, add the following code for inception of the moe serving forward:
+# if getattr(self, "weight_offloading_moe", False) and getattr(self, "active_slot", False) and getattr(self, "full_moe_compute_func", None) is not None:
+#     logger.info(f"~~~~ vllm/model_executor/layers/fused_moe/layer.py:FusedMoE forward_impl: weight offloading is enabled, calling function {self.full_moe_compute_func}...")
+#     return self.full_moe_compute_func(hidden_states, router_logits)
+
+
+
+
 # NOTE: Weight offloading mode, with whether to pin the postprocessed weights to CPU pinned memory.
 # usage: --additional-config '{"weight_offloading": true}' for single and multi-GPU (H2D is enabled by default), or --additional-config '{"weight_offloading": true, "moe_allgather_only": true}' for multi-GPU only (H2D is disabled).
 # 1. In vllm/model_executor/model_loader/base_loader.py: load_model function, after self.load_weights(model, model_config) and before process_weights_after_loading(model, model_config):
@@ -1045,3 +947,119 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 #       and in the device_loading_context function, if not_pin_postprocessed_weights_to_cpu is True, set the pin_memory to False.
 # if not_pin_postprocessed_weights_to_cpu:
 #     pin_memory = False
+
+
+
+
+# NOTE: Disable KV cache.
+# Usage: --additional-config '{"disable_kv_cache": true}'
+# 1. Initialize the additional_config in the vllm/v1/engine/core.py:__init__ function.
+# In the vllm/v1/engine/core.py:__init__ function, 
+#       before num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(vllm_config), 
+#       add the following code for disabling the KV cache:
+# self._additional_config = getattr(self.vllm_config, "additional_config", None)
+
+# 2. Setting the available_gpu_memory to 1 TB hardcoded when disable_kv_cache is enabled, for scheduling.
+# In the vllm/v1/engine/core.py:_initialize_kv_caches function, 
+#       after assert len(kv_cache_specs) == len(available_gpu_memory)
+#       and before kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs, available_gpu_memory),
+#       add the following code for disabling the KV cache:
+# if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+#     available_gpu_memory = [1024 * 1024 * 1024 * 1024] * len(kv_cache_specs)
+#     self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+#     logger.info(f"~~~~ vllm/v1/engine/core.py:_initialize_kv_caches: disable_kv_cache is enabled, so setting available_gpu_memory to 1 TB hardcoded...")
+
+# 3. Skip the KV cache tensor initialization when disable_kv_cache is enabled.
+# After setting the available_gpu_memory to 1 TB hardcoded only is not enough, 
+# Cause then self.model_executor.initialize_from_config(kv_cache_configs) function will initiate the KV cache tensors,
+# So we need to skip the KV cache tensor initialization when disable_kv_cache is enabled.
+# In the vllm/v1/worker/gpu_model_runner.py:initialize_kv_cache_tensors function, 
+#       update the following code by adding a new condition branch for disabling the KV cache tensor initialization:
+# if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+#     kv_caches: dict[str, torch.Tensor] = {}
+#     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+#         tensor = torch.zeros((2, 1), dtype=torch.bfloat16, device=self.device)
+#         for layer_name in kv_cache_tensor.shared_by:
+#             kv_caches[layer_name] = tensor
+#     logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:initialize_kv_cache_tensors: len(kv_caches) {len(kv_caches)}")
+# else:
+#     # original kv cache tensor initialization code
+
+# 4. Turn off the chunked-prefill when disable_kv_cache is enabled.
+# In the vllm/v1/engine/core.py:__init__ function, 
+#       after if len(kv_cache_config.kv_cache_groups) == 0, means no KV cache is needed, so turning off the chunked-prefill,
+#       So we follow the same logic to turn off the chunked-prefill manually, by adding the following code:
+# if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+#     vllm_config.scheduler_config.enable_chunked_prefill = False
+#     logger.info(f"~~~~ vllm/v1/engine/core.py:__init__: disable_kv_cache is enabled, turning off the chunked-prefill.")
+
+# 5. Redirect the attention computation backend API to use reuse the encoding kernel,
+#       So that we can skip the KV cache write and read operations, 
+#       and directly use the Causal Attention kernel from encoding kernel.
+# In the vllm/v1/attention/backends/flash_attn.py:FlashAttentionImpl:__init__ function end,
+#       add the following code for initialization the _additional_config:
+# self._additional_config = getattr(get_current_vllm_config(), "additional_config", None)
+# In the vllm/v1/attention/backends/flash_attn.py:FlashAttentionImpl:forward function,
+#       after "if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER)" condition branch function,
+#       add a new disable KV cache condition branch,
+#       for redirecting the attention computation backend API to reuse the encoding kernel:
+# if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+#     # Disable the KV cache,
+#     # Directly use the causal attention kernel from encoding kernel.
+#     return self._forward_prefill_only_attention(
+#         query[:num_actual_tokens],
+#         key[:num_actual_tokens],
+#         value[:num_actual_tokens],
+#         output[:num_actual_tokens],
+#         attn_metadata, 
+#         layer,
+#     )
+# In the vllm/v1/attention/backends/flash_attn.py, add the new function implementation:
+# def _forward_prefill_only_attention(
+#     self,
+#     query: torch.Tensor,
+#     key: torch.Tensor,
+#     value: torch.Tensor,
+#     output: torch.Tensor,
+#     attn_metadata: FlashAttentionMetadata,
+#     layer: torch.nn.Module,
+# ) -> torch.Tensor:
+#     """Forward pass for prefill-only attention.
+#     Args:
+#         query: shape = [num_prefill_tokens, num_heads, head_size]
+#         key: shape = [num_prefill_tokens, num_kv_heads, head_size]
+#         value: shape = [num_prefill_tokens, num_kv_heads, head_size]
+#         output: shape = [num_prefill_tokens, num_heads, head_size]
+#         attn_metadata: Prefill-only attention metadata
+#         layer: The attention layer
+#     """
+#     if self.kv_cache_dtype.startswith("fp8"):
+#         dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
+#             self.kv_cache_dtype)
+#         key = key.view(dtype)
+#         value = value.view(dtype)
+#     cu_seqlens_q = attn_metadata.query_start_loc
+#     cu_seqlens_k = attn_metadata.query_start_loc
+#     max_seqlen_q = attn_metadata.max_query_len
+#     max_seqlen_k = attn_metadata.max_query_len
+#     descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
+#     flash_attn_varlen_func(
+#         q=query,
+#         k=key,
+#         v=value,
+#         out=output,
+#         cu_seqlens_q=cu_seqlens_q,
+#         cu_seqlens_k=cu_seqlens_k,
+#         max_seqlen_q=max_seqlen_q,
+#         max_seqlen_k=max_seqlen_k,
+#         softmax_scale=self.scale,
+#         causal=True,                         
+#         alibi_slopes=self.alibi_slopes,
+#         window_size=self.sliding_window,
+#         softcap=self.logits_soft_cap,
+#         fa_version=self.vllm_flash_attn_version,
+#         q_descale=layer._q_scale.expand(descale_shape),
+#         k_descale=layer._k_scale.expand(descale_shape),
+#         v_descale=layer._v_scale.expand(descale_shape),
+#     )
+#     return output

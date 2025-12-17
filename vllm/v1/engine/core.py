@@ -247,6 +247,11 @@ class EngineCore:
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
+        if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+            available_gpu_memory = [1024 * 1024 * 1024 * 1024] * len(kv_cache_specs)
+            self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+            logger.info(f"~~~~ vllm/v1/engine/core.py:_initialize_kv_caches: disable_kv_cache is enabled, so setting available_gpu_memory to 1 TB hardcoded...")
+
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )

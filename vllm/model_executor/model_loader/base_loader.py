@@ -63,7 +63,6 @@ class BaseModelLoader(ABC):
             # so that the unpinned CPU memory for postprocessed weights will be freed after weight offloader initialization.
             additional_config = getattr(vllm_config, "additional_config", None)
             not_pin_postprocessed_weights_to_cpu = bool(isinstance(additional_config, dict) and additional_config.get("weight_offloading", False) and not additional_config.get("moe_allgather_only", False))
-            logger.info(f"~~~~ vllm/model_executor/model_loader/base_loader.py: load_model: not_pin_postprocessed_weights_to_cpu is: {not_pin_postprocessed_weights_to_cpu}")
             process_weights_after_loading(model, model_config, target_device, not_pin_postprocessed_weights_to_cpu)
             # process_weights_after_loading(model, model_config, target_device)
         return model.eval()
