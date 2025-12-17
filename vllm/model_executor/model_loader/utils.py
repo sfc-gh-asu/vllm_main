@@ -94,7 +94,8 @@ def initialize_model(
 
 
 def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
-                                  target_device: torch.device) -> None:
+                                  target_device: torch.device, not_pin_postprocessed_weights_to_cpu: bool = False) -> None:
+    logger.info(f"~~~~ vllm/model_executor/model_loader/utils.py: postprocessing_weights_after_loading...")
     for _, module in model.named_modules():
         if isinstance(module, QKVCrossParallelLinear):
             # NOTE(Isotr0py): special case for cross QKV layer because
@@ -108,7 +109,7 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             # to be on the global target device. This scope is for the
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
-            with device_loading_context(module, target_device):
+            with device_loading_context(module, target_device, not_pin_postprocessed_weights_to_cpu):
                 quant_method.process_weights_after_loading(module)
 
     # Currently only used by MLA.
@@ -124,7 +125,7 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
 
 @contextmanager
 def device_loading_context(module: torch.nn.Module,
-                           target_device: torch.device):
+                           target_device: torch.device, not_pin_postprocessed_weights_to_cpu: bool = False):
     if target_device.type == "cpu":
         # If target is CPU, no need to move anything
         yield module
@@ -145,6 +146,8 @@ def device_loading_context(module: torch.nn.Module,
     finally:
         # Restore parameters to their original devices, ignoring new parameters
         pin_memory = is_pin_memory_available()
+        if not_pin_postprocessed_weights_to_cpu:
+            pin_memory = False
         for name, p in module.named_parameters():
             if name in original_device_states:
                 original_device: torch.device = original_device_states[name]

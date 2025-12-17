@@ -1984,6 +1984,11 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+
+        if getattr(self, "weight_offloading_moe", False) and getattr(self, "active_slot", False) and getattr(self, "full_moe_compute_func", None) is not None:
+            # logger.info(f"~~~~ vllm/model_executor/layers/fused_moe/layer.py:FusedMoE forward_impl: weight offloading is enabled, calling function {self.full_moe_compute_func}...")
+            return self.full_moe_compute_func(hidden_states, router_logits)
+
         assert self.quant_method is not None
 
         self.ensure_moe_quant_config()

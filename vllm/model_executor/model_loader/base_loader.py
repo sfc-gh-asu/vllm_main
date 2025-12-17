@@ -48,5 +48,8 @@ class BaseModelLoader(ABC):
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
-            process_weights_after_loading(model, model_config, target_device)
+            additional_config = getattr(vllm_config, "additional_config", None)
+            not_pin_postprocessed_weights_to_cpu = bool(isinstance(additional_config, dict) and additional_config.get("weight_offloading", False) and not additional_config.get("moe_allgather_only", False))
+            process_weights_after_loading(model, model_config, target_device, not_pin_postprocessed_weights_to_cpu)
+            # process_weights_after_loading(model, model_config, target_device)
         return model.eval()
