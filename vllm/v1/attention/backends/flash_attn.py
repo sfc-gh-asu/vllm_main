@@ -480,6 +480,18 @@ class FlashAttentionImpl(AttentionImpl):
                                                    output[:num_actual_tokens],
                                                    attn_metadata, layer)
 
+        if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+            # Disable the KV cache,
+            # Directly use the causal attention kernel from encoding kernel.
+            return self._forward_prefill_only_attention(
+                query[:num_actual_tokens],
+                key[:num_actual_tokens],
+                value[:num_actual_tokens],
+                output[:num_actual_tokens],
+                attn_metadata, 
+                layer,
+            )
+
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
@@ -630,6 +642,55 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=layer._v_scale.expand(descale_shape),
         )
 
+        return output
+
+    def _forward_prefill_only_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
+        """Forward pass for prefill-only attention.
+        Args:
+            query: shape = [num_prefill_tokens, num_heads, head_size]
+            key: shape = [num_prefill_tokens, num_kv_heads, head_size]
+            value: shape = [num_prefill_tokens, num_kv_heads, head_size]
+            output: shape = [num_prefill_tokens, num_heads, head_size]
+            attn_metadata: Prefill-only attention metadata
+            layer: The attention layer
+        """
+        if self.kv_cache_dtype.startswith("fp8"):
+            dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
+                self.kv_cache_dtype)
+            key = key.view(dtype)
+            value = value.view(dtype)
+        cu_seqlens_q = attn_metadata.query_start_loc
+        cu_seqlens_k = attn_metadata.query_start_loc
+        max_seqlen_q = attn_metadata.max_query_len
+        max_seqlen_k = attn_metadata.max_query_len
+        descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
+        flash_attn_varlen_func(
+            q=query,
+            k=key,
+            v=value,
+            out=output,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=True,                         
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            softcap=self.logits_soft_cap,
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=layer._q_scale.expand(descale_shape),
+            k_descale=layer._k_scale.expand(descale_shape),
+            v_descale=layer._v_scale.expand(descale_shape),
+        )
         return output
 
 

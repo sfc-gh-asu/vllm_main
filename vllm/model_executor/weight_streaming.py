@@ -393,10 +393,10 @@ class _MoEGatherer:
             qm.process_weights_after_loading(tmpl)
             if not hasattr(qm, "rocm_aiter_moe_enabled"):
                 setattr(qm, "rocm_aiter_moe_enabled", False)
-        # For v0.11.0 and older version of vllm, use ensure_moe_quant_config()
-        tmpl.ensure_moe_quant_config()
-        # For new version of vllm, use ensure_moe_quant_config_init()
-        # tmpl.ensure_moe_quant_config_init()
+        # For old version of vllm, use ensure_moe_quant_config()
+        # tmpl.ensure_moe_quant_config()
+        # For v0.12.0 and newer version of vllm, use ensure_moe_quant_config_init()
+        tmpl.ensure_moe_quant_config_init()
         assert tmpl.local_num_experts == tmpl.global_num_experts
         return tmpl
 
@@ -483,10 +483,10 @@ class _MoEGatherer:
         torch.cuda.current_stream().wait_event(sig.ready)
 
         def compute_fn(hidden_states: torch.Tensor, router_logits: torch.Tensor):
-            # For v0.11.0 and older version of vllm, use ensure_moe_quant_config()
-            tmpl.ensure_moe_quant_config()
-            # For new version of vllm, use ensure_moe_quant_config_init()
-            # tmpl.ensure_moe_quant_config_init()
+            # For old version of vllm, use ensure_moe_quant_config()
+            # tmpl.ensure_moe_quant_config()
+            # For v0.12.0 and newer version of vllm, use ensure_moe_quant_config_init()
+            tmpl.ensure_moe_quant_config_init()
             return tmpl.quant_method.apply(
                 layer=tmpl,
                 x=hidden_states,
@@ -721,21 +721,55 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 # NOTE: The following notes are for the complete development of weight streaming, with all the features:
 # logger format change.
 # Print the forward batch size with tokens.
-# skipping the DeepGEMM warmup when weight offloading is enabled or skip_deep_gemm_warmup is enabled.
+# skipping the DeepGEMM warmup when weight offloading is enabled.
 # Simulation mode with reuse_first_layer.
 # Weight offloading mode.
 # Disable KV cache.
 
+# Related files:
+# adding new file: 
+#   vllm/model_executor/weight_streaming.py
+# Modifying the following files:
+#   vllm/v1/worker/gpu_model_runner.py
+#      contains 3 parts:
+#          1. initialize the additional_config
+#          2. logging out the scheduling tokens each forward pass
+#          3. initialize the weight offloading manager
+
+#   vllm/model_executor/model_loader/base_loader.py
+#   vllm/model_executor/model_loader/utils.py
+#   vllm/v1/engine/core.py
+#   vllm/v1/attention/backends/flash_attn.py
+#   vllm/v1/attention/backends/cpu_attn.py
+#   vllm/v1/attention/backends/flash_attn.py
 
 
 
 # NOTE: Update logger to print the complete function name and path.
+# Usage: logger.info("~~~~ ...")
 # In vllm/logger.py: change the _FORMAT to the following:
 # _FORMAT = (
 #    f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
 #    "[%(pathname)s:%(lineno)d] %(message)s"
 # )
 
+
+
+
+# NOTE: Disable logging warning for "Current vLLM config is not set." from vllm.py:
+# In file vllm/config/vllm.py: get_current_vllm_config function, comment out the following lines:
+# logger.warning("Current vLLM config is not set.")
+
+
+
+
+# NOTE: Disable logging info for "Chunked prefill is enabled with max_num_batched_tokens..." from scheduler.py:
+# In file vllm/config/scheduler.py: class SchedulerConfig __post_init__ function, comment out the following lines:
+# if self.enable_chunked_prefill:
+#     logger.info(
+#         "Chunked prefill is enabled with max_num_batched_tokens=%d.",
+#         self.max_num_batched_tokens,
+#     )
 
 
 
@@ -765,7 +799,7 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 # NOTE: Adding new features of reuse_first_layer and weight offloading.
 # Usage: --additional-config '{"reuse_first_layer": true}'; 
 # Usage: --additional-config '{"weight_offloading": true}' for single and multi-GPU (H2D is enabled by default), or --additional-config '{"weight_offloading": true, "moe_allgather_only": true}' for multi-GPU only (H2D is disabled).
-# In vllm/model_executor/models/utils.py: make_layers function, after start_layer, end_layer = get_pp_indices(...). :
+# In vllm/model_executor/models/utils.py: make_layers function:
 # from vllm.config import get_current_vllm_config
 # cfg = get_current_vllm_config()
 # ac = getattr(cfg, "additional_config", None)
@@ -779,7 +813,7 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 
 # NOTE: Simulation mode with reuse_first_layer.
 # Usage: --additional-config '{"reuse_first_layer": true}'
-# In vllm/model_executor/models/utils.py, add this new function for reuse_first_layer above the make_layers function:
+# In vllm/model_executor/models/utils.py, add this new function for reuse_first_layer:
 # def make_layers_with_first_layer_weights(
 #     start_layer: int,
 #     end_layer: int,
@@ -819,9 +853,35 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 
 
 
+
+# NOTE: Weight offloading mode, turn on in the GPU Model Runner.
+# In the end of the GPUModelRunner __init__ function, add the following code:
+# self._additional_config = getattr(self.vllm_config, "additional_config", None)
+
+
+
+
+# NOTE: Weight offloading mode, turn on in the GPU Model Runner.
+# In the end of the GPUModelRunner load_model function, just after load model and if self.lora_config: 
+# if isinstance(self._additional_config, dict) and self._additional_config.get("weight_offloading", False):
+#     logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: weight_offloading is enabled...")
+#     logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: self.vllm_config: {self.vllm_config}.") 
+#     logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: self.vllm_config.parallel_config: {self.vllm_config.parallel_config}.")
+#     assert self.vllm_config.parallel_config.tensor_parallel_size == 1 and self.vllm_config.parallel_config.pipeline_parallel_size == 1, "Weight offloading not supported for tensor parallel or pipeline parallel server."
+#     from vllm.model_executor.weight_streaming import init_decoder_weight_streaming
+#     init_decoder_weight_streaming(model=self.model,
+#                 device=self.device,
+#                 vllm_config=self.vllm_config,
+#                 pin_memory=self.pin_memory,
+#                 num_slots=5,
+#                 window_k=3)
+
+
+
+
 # NOTE: Weight offloading mode, with a new function for weight offloading.
 # usage: --additional-config '{"weight_offloading": true}' for single and multi-GPU, or --additional-config '{"weight_offloading": true, "moe_allgather_only": true}' for multi-GPU only.
-# In vllm/model_executor/models/utils.py, add this new function for weight offloading above the make_layers function:
+# In vllm/model_executor/models/utils.py, add this new function for weight offloading:
 # def make_layers_with_weight_offloading(
 #     start_layer: int,
 #     end_layer: int,
@@ -870,31 +930,6 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 
 
 
-# NOTE: Weight offloading mode, turn on in the GPU Model Runner.
-# In the end of the GPUModelRunner __init__ function, add the following code:
-# self._additional_config = getattr(self.vllm_config, "additional_config", None)
-
-
-
-
-# NOTE: Weight offloading mode, turn on in the GPU Model Runner.
-# In the end of the GPUModelRunner load_model function, just after load model and if self.lora_config: 
-# if isinstance(self._additional_config, dict) and self._additional_config.get("weight_offloading", False):
-#     logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: weight_offloading is enabled...")
-#     logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: self.vllm_config: {self.vllm_config}.") 
-#     logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:load_model: self.vllm_config.parallel_config: {self.vllm_config.parallel_config}.")
-#     assert self.vllm_config.parallel_config.tensor_parallel_size == 1 and self.vllm_config.parallel_config.pipeline_parallel_size == 1, "Weight offloading not supported for tensor parallel or pipeline parallel server."
-#     from vllm.model_executor.weight_streaming import init_decoder_weight_streaming
-#     init_decoder_weight_streaming(model=self.model,
-#                 device=self.device,
-#                 vllm_config=self.vllm_config,
-#                 pin_memory=self.pin_memory,
-#                 num_slots=5,
-#                 window_k=3)
-
-
-
-
 # NOTE: Multi-GPU weight offloading mode, compute the MoE part in each GPU individually, so inception of MoE forward is needed for each GPU.
 # usage: --additional-config '{"weight_offloading": true}' for multi-GPU (H2D is enabled by default), or --additional-config '{"weight_offloading": true, "moe_allgather_only": true}' for multi-GPU only (H2D is disabled).
 # In vllm/model_executor/layers/fused_moe/layer.py, find the real forward function of MoE, which is forward_impl for qwen3 moe models.
@@ -923,8 +958,6 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 # process_weights_after_loading(model, model_config, target_device, not_pin_postprocessed_weights_to_cpu)
 
 # 2. In vllm/model_executor/model_loader/utils.py: process_weights_after_loading:
-#       add the following code for logging before the process_weights_after_loading function.
-# logger.info(f"~~~~ vllm/model_executor/model_loader/utils.py: postprocessing_weights_after_loading...")
 #       add the new parameter not_pin_postprocessed_weights_to_cpu: bool = False,
 #       in the with device_loading_context(module, target_device, not_pin_postprocessed_weights_to_cpu) block,
 #       pass the not_pin_postprocessed_weights_to_cpu to the device_loading_context function.
@@ -974,7 +1007,7 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 #       after if len(kv_cache_config.kv_cache_groups) == 0, means no KV cache is needed, so turning off the chunked-prefill,
 #       So we follow the same logic to turn off the chunked-prefill manually, by adding the following code:
 # if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
-#     vllm_config.scheduler_config.enable_chunked_prefill = False
+#     vllm_config.scheduler_config.chunked_prefill_enabled = False
 #     logger.info(f"~~~~ vllm/v1/engine/core.py:__init__: disable_kv_cache is enabled, turning off the chunked-prefill.")
 
 # 5. Redirect the attention computation backend API to use reuse the encoding kernel,
@@ -984,7 +1017,7 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 #       add the following code for initialization the _additional_config:
 # self._additional_config = getattr(get_current_vllm_config(), "additional_config", None)
 # In the vllm/v1/attention/backends/flash_attn.py:FlashAttentionImpl:forward function,
-#       after if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER),
+#       after "if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER)" condition branch function,
 #       add a new disable KV cache condition branch,
 #       for redirecting the attention computation backend API to reuse the encoding kernel:
 # if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
@@ -998,7 +1031,8 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 #         attn_metadata, 
 #         layer,
 #     )
-# In the vllm/v1/attention/backends/cpu_attn.py, add the new function implementation:
+
+# In the vllm/v1/attention/backends/flash_attn.py, add the new function implementation:
 # def _forward_prefill_only_attention(
 #     self,
 #     query: torch.Tensor,

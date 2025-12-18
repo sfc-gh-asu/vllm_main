@@ -87,6 +87,7 @@ class EngineCore:
 
         self.available_gpu_memory_for_kv_cache = -1
 
+        self._additional_config = getattr(self.vllm_config, "additional_config", None)
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
             self._initialize_kv_caches(vllm_config)
@@ -120,6 +121,11 @@ class EngineCore:
             # chunked prefill. But do SSM models?
             logger.info("Disabling chunked prefill for model without KVCache")
             vllm_config.scheduler_config.chunked_prefill_enabled = False
+
+        if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            logger.info(f"~~~~ vllm/v1/engine/core.py:__init__: disable_kv_cache is enabled, turning off the chunked-prefill.")
 
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
@@ -195,6 +201,11 @@ class EngineCore:
             available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
+
+        if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+            available_gpu_memory = [1024 * 1024 * 1024 * 1024] * len(kv_cache_specs)
+            self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+            logger.info(f"~~~~ vllm/v1/engine/core.py:_initialize_kv_caches: disable_kv_cache is enabled, so setting available_gpu_memory to 1 TB hardcoded...")
 
         kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
                                                 available_gpu_memory)

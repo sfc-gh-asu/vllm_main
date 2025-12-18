@@ -3938,11 +3938,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
-                                                   kv_cache_raw_tensors)
+        if isinstance(self._additional_config, dict) and self._additional_config.get("disable_kv_cache", False):
+            kv_caches: dict[str, torch.Tensor] = {}
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                tensor = torch.zeros((2, 1), dtype=torch.bfloat16, device=self.device)
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_caches[layer_name] = tensor
+            logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:initialize_kv_cache_tensors with disable_kv_cache for len(kv_caches): {len(kv_caches)}.")
+        else:
+            # Initialize the memory buffer for KV cache
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            # Change the memory buffer to the desired shape
+            kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
+                                                    kv_cache_raw_tensors)
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
