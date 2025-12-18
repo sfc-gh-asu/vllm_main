@@ -756,6 +756,23 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 
 
 
+# NOTE: Disable logging warning for "Current vLLM config is not set." from vllm.py:
+# In file vllm/config/vllm.py: get_current_vllm_config function, comment out the following lines:
+# logger.warning("Current vLLM config is not set.")
+
+
+
+
+# NOTE: Disable logging info for "Chunked prefill is enabled with max_num_batched_tokens..." from scheduler.py:
+# In file vllm/config/scheduler.py: class SchedulerConfig __post_init__ function, comment out the following lines:
+# if self.enable_chunked_prefill:
+#     logger.info(
+#         "Chunked prefill is enabled with max_num_batched_tokens=%d.",
+#         self.max_num_batched_tokens,
+#     )
+
+
+
 # NOTE: Print the forward batch size with tokens
 # In vllm/v1/worker/gpu_model_runner.py:execute_model: add the following logging before the _model_forward call.
 # logger.info(f"~~~~ vllm/v1/worker/gpu_model_runner.py:execute_model: num_scheduled_tokens: {num_scheduled_tokens}.")

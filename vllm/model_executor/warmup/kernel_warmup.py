@@ -36,12 +36,12 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
-    try:
-        if isinstance(worker.model_runner._additional_config, dict) and (worker.model_runner._additional_config.get("weight_offloading", False) or worker.model_runner._additional_config.get("skip_deep_gemm_warmup", False)):
-            logger.info("~~~~ vllm/model_executor/warmup/kernel_warmup.py:kernel_warmup: Skipping DeepGEMM warmup, because weight offloading or skip_deep_gemm_warmup is enabled.")
-            do_deep_gemm_warmup = False
-    except Exception:
-        pass
+    # try:
+    #     if isinstance(worker.model_runner._additional_config, dict) and (worker.model_runner._additional_config.get("weight_offloading", False) or worker.model_runner._additional_config.get("skip_deep_gemm_warmup", False)):
+    #         logger.info("~~~~ vllm/model_executor/warmup/kernel_warmup.py:kernel_warmup: Skipping DeepGEMM warmup, because weight offloading or skip_deep_gemm_warmup is enabled.")
+    #         do_deep_gemm_warmup = False
+    # except Exception:
+    #     pass
 
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
     if has_flashinfer() and current_platform.has_device_capability(90):

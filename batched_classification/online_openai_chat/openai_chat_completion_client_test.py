@@ -33,8 +33,8 @@ messages = [
         "content": "7",
     },
     # {"role": "user", "content": "4+3="},
-    # {"role": "user", "content": "8+1="},
-    {"role": "user", "content": "1+3="},
+    {"role": "user", "content": "8+1="},
+    # {"role": "user", "content": "1+3="},
 ]
 
 
