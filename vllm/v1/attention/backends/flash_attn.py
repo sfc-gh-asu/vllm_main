@@ -419,6 +419,9 @@ class FlashAttentionImpl(AttentionImpl):
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer")
 
+        from vllm.config import get_current_vllm_config
+        self._additional_config = getattr(get_current_vllm_config(), "additional_config", None)
+
     def forward(
         self,
         layer: torch.nn.Module,

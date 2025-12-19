@@ -394,9 +394,9 @@ class _MoEGatherer:
             if not hasattr(qm, "rocm_aiter_moe_enabled"):
                 setattr(qm, "rocm_aiter_moe_enabled", False)
         # For old version of vllm, use ensure_moe_quant_config()
-        # tmpl.ensure_moe_quant_config()
+        tmpl.ensure_moe_quant_config()
         # For v0.12.0 and newer version of vllm, use ensure_moe_quant_config_init()
-        tmpl.ensure_moe_quant_config_init()
+        # tmpl.ensure_moe_quant_config_init()
         assert tmpl.local_num_experts == tmpl.global_num_experts
         return tmpl
 
@@ -484,9 +484,9 @@ class _MoEGatherer:
 
         def compute_fn(hidden_states: torch.Tensor, router_logits: torch.Tensor):
             # For old version of vllm, use ensure_moe_quant_config()
-            # tmpl.ensure_moe_quant_config()
+            tmpl.ensure_moe_quant_config()
             # For v0.12.0 and newer version of vllm, use ensure_moe_quant_config_init()
-            tmpl.ensure_moe_quant_config_init()
+            # tmpl.ensure_moe_quant_config_init()
             return tmpl.quant_method.apply(
                 layer=tmpl,
                 x=hidden_states,
@@ -1016,6 +1016,7 @@ def init_decoder_weight_streaming(model: torch.nn.Module,
 # In the vllm/v1/attention/backends/flash_attn.py:FlashAttentionImpl:__init__ function end,
 #       add the following code for initialization the _additional_config:
 # self._additional_config = getattr(get_current_vllm_config(), "additional_config", None)
+
 # In the vllm/v1/attention/backends/flash_attn.py:FlashAttentionImpl:forward function,
 #       after "if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER)" condition branch function,
 #       add a new disable KV cache condition branch,
